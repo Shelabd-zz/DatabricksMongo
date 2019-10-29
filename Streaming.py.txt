@@ -1,0 +1,65 @@
+import asyncio
+import time
+import pymongo
+import sys
+import logging
+
+from azure.eventhub.aio import EventHubClient
+from azure.eventhub.aio.eventprocessor import EventProcessor, PartitionProcessor
+from azure.storage.blob.aio import ContainerClient
+from azure.eventhub.extensions.checkpointstoreblobaio import BlobPartitionManager
+
+
+logger = logging.getLogger("azure")
+# TODO: Fill these out
+event_hub_connection_string = ""
+mongo_connection_string = ""
+mongo_database = ""
+mongo_collection = ""
+
+storage_connection_string = ""
+storage_container = ""
+
+mongo_client = pymongo.MongoClient(mongo_connection_string)
+db = mongo_client[mongo_database]
+
+class EventPartitionProcessor(PartitionProcessor):
+    async def process_events(self, events, partition_context):
+        if events:
+            print(f"{len(events)} events found")
+            
+            event_count = 0
+            start_time = time.time()
+            
+            for event_data in events:
+              op_type = event_data.body_as_json()["op_type"]
+              data = event_data.body_as_json()["after"]
+              
+              shipment_seq = data["SHIPMENT_SEQ"]
+              print(f"shipment_seq={shipment_seq}")
+              event_count += 1
+            
+            try:
+              db.eventscollection.insert_one(data)            
+              print(f"updating checkpoint to offset {events[-1].offset}, sequence {events[-1].sequence_number}")
+              await partition_context.update_checkpoint(events[-1].offset, events[-1].sequence_number)
+            except:
+               print(f"Exception occurred:{sys.exc_info()[0]}.")
+            data_list = []
+            end_time = time.time()
+            run_time = end_time - start_time
+            print("Received {} messages in {} seconds".format(event_count, run_time))            
+
+async def main():
+    eventhub_client = EventHubClient.from_connection_string(event_hub_connection_string, receive_timeout=20, retry_total=3)
+    storage_container_client = ContainerClient.from_connection_string(storage_connection_string, storage_container)
+    partition_manager = BlobPartitionManager(storage_container_client)
+    event_processor = EventProcessor(eventhub_client, "$default", EventPartitionProcessor, partition_manager)    
+    async with storage_container_client:
+        asyncio.ensure_future(event_processor.start())
+        await asyncio.sleep(3600)  # run for a while
+        await event_processor.stop()
+  
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
